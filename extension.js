@@ -149,16 +149,9 @@ class CodexUsageIndicator extends PanelMenu.Button {
             return this._normalizeProxyUrl(configuredProxyUrl);
         }
 
-        const envProxyUrl = GLib.getenv('CODEX_USAGE_PROXY_URL')
-            ?? GLib.getenv('HTTPS_PROXY')
-            ?? GLib.getenv('https_proxy')
-            ?? GLib.getenv('HTTP_PROXY')
-            ?? GLib.getenv('http_proxy')
-            ?? GLib.getenv('ALL_PROXY')
-            ?? GLib.getenv('all_proxy')
-            ?? '';
-        if (envProxyUrl.trim() !== '') {
-            return this._normalizeProxyUrl(envProxyUrl.trim());
+        const usageProxyUrl = GLib.getenv('CODEX_USAGE_PROXY_URL') ?? '';
+        if (usageProxyUrl.trim() !== '') {
+            return this._normalizeProxyUrl(usageProxyUrl.trim());
         }
 
         const forwarderService = Gio.File.new_for_path(GLib.build_filenamev([
@@ -170,6 +163,17 @@ class CodexUsageIndicator extends PanelMenu.Button {
         ]));
         if (forwarderService.query_exists(null)) {
             return 'http://127.0.0.1:18080';
+        }
+
+        const envProxyUrl = GLib.getenv('HTTPS_PROXY')
+            ?? GLib.getenv('https_proxy')
+            ?? GLib.getenv('HTTP_PROXY')
+            ?? GLib.getenv('http_proxy')
+            ?? GLib.getenv('ALL_PROXY')
+            ?? GLib.getenv('all_proxy')
+            ?? '';
+        if (envProxyUrl.trim() !== '') {
+            return this._normalizeProxyUrl(envProxyUrl.trim());
         }
 
         return '';

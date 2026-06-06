@@ -80,10 +80,10 @@ Proxy URLs must use standard authority order:
 http://user:password@host:port
 ```
 
-If the proxy field is empty, the extension checks `CODEX_USAGE_PROXY_URL`,
-standard `HTTPS_PROXY` / `HTTP_PROXY` environment variables, and the local
-Codex Desktop proxy forwarder at `http://127.0.0.1:18080` when its user systemd
-service exists.
+If the proxy field is empty, the extension checks `CODEX_USAGE_PROXY_URL`, then
+the local Codex Desktop proxy forwarder at `http://127.0.0.1:18080` when its
+user systemd service exists, then standard `HTTPS_PROXY` / `HTTP_PROXY`
+environment variables.
 
 ## Disclaimer
 
