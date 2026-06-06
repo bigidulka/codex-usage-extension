@@ -7,11 +7,13 @@ Display OpenAI Codex usage in the GNOME Shell top panel.
 ## What It Shows
 
 - Shows current 5-hour usage in the top panel
-- Displays 5-hour and weekly usage in the dropdown menu
+- Displays 5-hour, weekly, and Codex Spark usage in the dropdown menu
 - Shows reset countdowns and last refresh time
 - Supports text, progress bar, or both
 - Can show used or remaining percentages
 - Includes configurable refresh interval, icon style, and optional HTTP proxy
+- Falls back to recent `~/.codex/sessions` logs when ChatGPT backend usage
+  endpoints reject headless requests
 
 ## Requirements
 
@@ -63,7 +65,25 @@ Reload GNOME Shell after installation:
 
 ## Notes
 
-The extension reads authentication from `~/.codex/auth.json` or `$CODEX_HOME/auth.json`, then requests usage from `https://chatgpt.com/backend-api/wham/usage`.
+The extension reads authentication from `~/.codex/auth.json` or
+`$CODEX_HOME/auth.json`, then requests usage from:
+
+- `https://chatgpt.com/backend-api/codex/usage`
+- `https://chatgpt.com/backend-api/wham/usage`
+
+If both endpoints fail, it reads recent local Codex session logs from
+`~/.codex/sessions` and uses the last emitted `rate_limits` payload.
+
+Proxy URLs must use standard authority order:
+
+```text
+http://user:password@host:port
+```
+
+If the proxy field is empty, the extension checks `CODEX_USAGE_PROXY_URL`,
+standard `HTTPS_PROXY` / `HTTP_PROXY` environment variables, and the local
+Codex Desktop proxy forwarder at `http://127.0.0.1:18080` when its user systemd
+service exists.
 
 ## Disclaimer
 

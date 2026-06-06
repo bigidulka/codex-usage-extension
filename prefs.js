@@ -137,12 +137,22 @@ export default class CodexUsagePreferences extends ExtensionPreferences {
         networkGroup.add(proxyRow);
 
         const proxyHint = new Gtk.Label({
-            label: 'Example: http://localhost:11809 (leave empty for no proxy)',
+            label: 'Examples: http://127.0.0.1:18080 or http://user:password@host:port. If empty, env proxy and the Codex Desktop local forwarder are auto-detected.',
             xalign: 0,
             css_classes: ['dim-label', 'caption'],
             margin_start: 12,
             margin_top: 4,
         });
         networkGroup.add(proxyHint);
+
+        const sourceHint = new Gtk.Label({
+            label: 'If ChatGPT backend requests return 403, the extension falls back to recent ~/.codex/sessions rate_limits. Spark appears when the backend or local logs expose an individual/model Spark limit.',
+            xalign: 0,
+            wrap: true,
+            css_classes: ['dim-label', 'caption'],
+            margin_start: 12,
+            margin_top: 4,
+        });
+        networkGroup.add(sourceHint);
     }
 }

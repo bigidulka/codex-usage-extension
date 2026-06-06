@@ -11,7 +11,10 @@ import * as PopupMenu from 'resource:///org/gnome/shell/ui/popupMenu.js';
 
 import {Extension, gettext as _} from 'resource:///org/gnome/shell/extensions/extension.js';
 
-const USAGE_API_URL = 'https://chatgpt.com/backend-api/wham/usage';
+const USAGE_API_URLS = [
+    'https://chatgpt.com/backend-api/codex/usage',
+    'https://chatgpt.com/backend-api/wham/usage',
+];
 const PANEL_PROGRESS_BAR_WIDTH = 50;
 const MENU_PROGRESS_BAR_WIDTH = 240;
 
@@ -73,12 +76,12 @@ class CodexUsageIndicator extends PanelMenu.Button {
                 this._updateIconVisibility();
             } else if (key === 'icon-style') {
                 this._updateIconStyle();
-            } else if (key === 'proxy-url') {
-                this._recreateSession();
-            } else if (key === 'usage-display') {
-                this._updateUsageTitles();
-                this._refreshUsage();
-            }
+        } else if (key === 'proxy-url') {
+            this._recreateSession();
+        } else if (key === 'usage-display') {
+            this._updateUsageTitles();
+            this._refreshUsage();
+        }
         });
 
         this._refreshUsage();
@@ -130,7 +133,7 @@ class CodexUsageIndicator extends PanelMenu.Button {
 
     _createSession() {
         const session = new Soup.Session();
-        const proxyUrl = this._settings.get_string('proxy-url').trim();
+        const proxyUrl = this._proxyUrl();
 
         if (proxyUrl !== '') {
             const proxyResolver = Gio.SimpleProxyResolver.new(proxyUrl, null);
@@ -138,6 +141,47 @@ class CodexUsageIndicator extends PanelMenu.Button {
         }
 
         return session;
+    }
+
+    _proxyUrl() {
+        const configuredProxyUrl = this._settings.get_string('proxy-url').trim();
+        if (configuredProxyUrl !== '') {
+            return this._normalizeProxyUrl(configuredProxyUrl);
+        }
+
+        const envProxyUrl = GLib.getenv('CODEX_USAGE_PROXY_URL')
+            ?? GLib.getenv('HTTPS_PROXY')
+            ?? GLib.getenv('https_proxy')
+            ?? GLib.getenv('HTTP_PROXY')
+            ?? GLib.getenv('http_proxy')
+            ?? GLib.getenv('ALL_PROXY')
+            ?? GLib.getenv('all_proxy')
+            ?? '';
+        if (envProxyUrl.trim() !== '') {
+            return this._normalizeProxyUrl(envProxyUrl.trim());
+        }
+
+        const forwarderService = Gio.File.new_for_path(GLib.build_filenamev([
+            GLib.get_home_dir(),
+            '.config',
+            'systemd',
+            'user',
+            'codex-electron-proxy-forwarder.service',
+        ]));
+        if (forwarderService.query_exists(null)) {
+            return 'http://127.0.0.1:18080';
+        }
+
+        return '';
+    }
+
+    _normalizeProxyUrl(proxyUrl) {
+        const match = proxyUrl.match(/^(https?:\/\/)([^/@:]+(?:\.[^/@:]+)*|\[[^\]]+\]):(\d+)@([^:]+):(.+)$/);
+        if (match) {
+            return `${match[1]}${encodeURIComponent(match[4])}:${encodeURIComponent(match[5])}@${match[2]}:${match[3]}`;
+        }
+
+        return proxyUrl;
     }
 
     _recreateSession() {
@@ -247,6 +291,56 @@ class CodexUsageIndicator extends PanelMenu.Button {
         });
         weeklyItem.add_child(weeklyBox);
         this.menu.addMenuItem(weeklyItem);
+
+        this.menu.addMenuItem(new PopupMenu.PopupSeparatorMenuItem());
+
+        const sparkBox = new St.BoxLayout({
+            style_class: 'codex-usage-section',
+            vertical: true,
+            x_expand: true,
+        });
+        const sparkHeader = new St.BoxLayout({
+            vertical: false,
+            x_expand: true,
+            style_class: 'codex-section-header',
+        });
+        this._sparkTitle = new St.Label({
+            text: 'Spark Used',
+            style_class: 'codex-section-title',
+            x_expand: true,
+            x_align: Clutter.ActorAlign.START,
+        });
+        sparkHeader.add_child(this._sparkTitle);
+        this._sparkPercent = new St.Label({
+            text: '...',
+            style_class: 'codex-percent-label',
+            x_align: Clutter.ActorAlign.END,
+        });
+        sparkHeader.add_child(this._sparkPercent);
+        sparkBox.add_child(sparkHeader);
+
+        const sparkProgressBg = new St.Widget({
+            style_class: 'codex-progress-bg',
+            x_expand: true,
+        });
+        this._sparkProgressBar = new St.Widget({
+            style_class: 'codex-progress-bar usage-low',
+        });
+        sparkProgressBg.add_child(this._sparkProgressBar);
+        sparkBox.add_child(sparkProgressBg);
+
+        this._sparkResetLabel = new St.Label({
+            text: 'Resets: ...',
+            style_class: 'codex-reset-label',
+        });
+        sparkBox.add_child(this._sparkResetLabel);
+
+        const sparkItem = new PopupMenu.PopupBaseMenuItem({
+            reactive: false,
+            can_focus: false,
+        });
+        sparkItem.add_child(sparkBox);
+        this.menu.addMenuItem(sparkItem);
 
         this.menu.addMenuItem(new PopupMenu.PopupSeparatorMenuItem());
 
@@ -362,7 +456,12 @@ class CodexUsageIndicator extends PanelMenu.Button {
     }
 
     _fetchUsage(accessToken, accountId) {
-        const message = Soup.Message.new('GET', USAGE_API_URL);
+        this._fetchUsageEndpoint(accessToken, accountId, 0);
+    }
+
+    _fetchUsageEndpoint(accessToken, accountId, index) {
+        const url = USAGE_API_URLS[index];
+        const message = Soup.Message.new('GET', url);
         message.request_headers.append('Authorization', `Bearer ${accessToken}`);
         message.request_headers.append('User-Agent', 'codex-cli');
         if (accountId) {
@@ -378,46 +477,225 @@ class CodexUsageIndicator extends PanelMenu.Button {
                     const bytes = session.send_and_read_finish(result);
 
                     if (message.status_code !== 200) {
-                        this._setUnavailableState('Error', `HTTP ${message.status_code}`);
-                        this._updateLastCheckedLabel();
+                        this._tryNextUsageSource(accessToken, accountId, index, `HTTP ${message.status_code}`);
                         return;
                     }
 
                     const decoder = new TextDecoder('utf-8');
                     const data = JSON.parse(decoder.decode(bytes.get_data()));
+                    const usage = this._normalizeUsagePayload(data);
 
-                    if (!data.rate_limit) {
-                        this._setUnavailableState('—', 'No data');
+                    if (!usage.primary && !usage.secondary && !usage.spark) {
+                        this._tryNextUsageSource(accessToken, accountId, index, 'No data');
                     } else {
-                        this._updateDisplay(this._normalizeApiResponse(data.rate_limit));
+                        this._updateDisplay(usage);
+                        this._updateLastCheckedLabel();
                     }
-                    this._updateLastCheckedLabel();
                 } catch (e) {
                     console.error('Codex Usage: API request failed:', e.message);
-                    this._setUnavailableState('Error', 'API failed');
-                    this._updateLastCheckedLabel();
+                    this._tryNextUsageSource(accessToken, accountId, index, e.message);
                 }
             }
         );
     }
 
-    _normalizeApiResponse(rl) {
+    _tryNextUsageSource(accessToken, accountId, index, reason) {
+        if (index + 1 < USAGE_API_URLS.length) {
+            this._fetchUsageEndpoint(accessToken, accountId, index + 1);
+            return;
+        }
+
+        const localUsage = this._loadUsageFromSessions();
+        if (localUsage) {
+            this._updateDisplay(localUsage);
+        } else {
+            this._setUnavailableState('Error', reason || 'API failed');
+        }
+        this._updateLastCheckedLabel();
+    }
+
+    _normalizeUsagePayload(data) {
+        const root = data?.rate_limit ?? data?.rate_limits ?? data?.usage ?? data;
         return {
-            rate_limit: {
-                primary_window: {
-                    used_percent: this._coercePercent(rl.primary_window?.used_percent),
-                    reset_at: rl.primary_window?.reset_at
-                        ? new Date(rl.primary_window.reset_at * 1000).toISOString()
-                        : null,
-                },
-                secondary_window: {
-                    used_percent: this._coercePercent(rl.secondary_window?.used_percent),
-                    reset_at: rl.secondary_window?.reset_at
-                        ? new Date(rl.secondary_window.reset_at * 1000).toISOString()
-                        : null,
-                },
-            },
+            primary: this._findWindow(root, ['primary_window', 'primary', '5h', 'five_hour', 'five-hour']),
+            secondary: this._findWindow(root, ['secondary_window', 'secondary', 'weekly', '7d', 'week']),
+            spark: this._findSparkWindow(root),
         };
+    }
+
+    _loadUsageFromSessions() {
+        try {
+            const codexHome = GLib.getenv('CODEX_HOME') ??
+                GLib.build_filenamev([GLib.get_home_dir(), '.codex']);
+            const sessionsDir = GLib.build_filenamev([codexHome, 'sessions']);
+            if (!Gio.File.new_for_path(sessionsDir).query_exists(null)) {
+                return null;
+            }
+
+            const script = [
+                `dir=${GLib.shell_quote(sessionsDir)}`,
+                'find "$dir" -type f -name "*.jsonl" -printf "%T@ %p\\n" 2>/dev/null | sort -nr | head -n 12 | cut -d" " -f2- | while IFS= read -r file; do tail -n 500 "$file"; done',
+            ].join('; ');
+            const [, stdout, , status] = GLib.spawn_sync(
+                null,
+                ['sh', '-lc', script],
+                null,
+                GLib.SpawnFlags.SEARCH_PATH,
+                null
+            );
+            if (status !== 0 || !stdout) {
+                return null;
+            }
+
+            const lines = new TextDecoder('utf-8').decode(stdout).trim().split('\n').reverse();
+            for (const line of lines) {
+                try {
+                    const event = JSON.parse(line);
+                    if (event?.rate_limits) {
+                        return this._normalizeUsagePayload(event.rate_limits);
+                    }
+                } catch {
+                    // Ignore non-JSON or partial log lines.
+                }
+            }
+        } catch (e) {
+            console.error('Codex Usage: Failed to read local sessions:', e.message);
+        }
+
+        return null;
+    }
+
+    _findWindow(root, names) {
+        if (!root) {
+            return null;
+        }
+
+        for (const name of names) {
+            const value = this._getCaseInsensitive(root, name);
+            const normalized = this._normalizeWindow(value);
+            if (normalized) {
+                return normalized;
+            }
+        }
+
+        return this._walkForWindow(root, (key, value) => {
+            const normalizedKey = key.toLowerCase().replace(/_/g, '-');
+            if (!names.some(name => normalizedKey.includes(name.replace(/_/g, '-')))) {
+                return null;
+            }
+
+            return this._normalizeWindow(value);
+        });
+    }
+
+    _findSparkWindow(root) {
+        if (!root) {
+            return null;
+        }
+
+        const direct = this._normalizeWindow(root.individual_limit);
+        if (direct) {
+            return direct;
+        }
+
+        return this._walkForWindow(root, (key, value) => {
+            const text = `${key} ${value?.model ?? ''} ${value?.limit_id ?? ''} ${value?.limit_name ?? ''}`.toLowerCase();
+            if (!text.includes('spark')) {
+                return null;
+            }
+
+            return this._normalizeWindow(value) ?? this._walkForWindow(value, (_nestedKey, nestedValue) => {
+                return this._normalizeWindow(nestedValue);
+            });
+        });
+    }
+
+    _walkForWindow(value, matcher) {
+        if (!value || typeof value !== 'object') {
+            return null;
+        }
+
+        if (Array.isArray(value)) {
+            for (const item of value) {
+                const nested = this._walkForWindow(item, matcher);
+                if (nested) {
+                    return nested;
+                }
+            }
+            return null;
+        }
+
+        for (const [key, child] of Object.entries(value)) {
+            const matched = matcher(key, child);
+            if (matched) {
+                return matched;
+            }
+            const nested = this._walkForWindow(child, matcher);
+            if (nested) {
+                return nested;
+            }
+        }
+
+        return null;
+    }
+
+    _getCaseInsensitive(object, name) {
+        if (!object || typeof object !== 'object') {
+            return null;
+        }
+
+        const target = name.toLowerCase();
+        for (const [key, value] of Object.entries(object)) {
+            if (key.toLowerCase() === target) {
+                return value;
+            }
+        }
+
+        return null;
+    }
+
+    _normalizeWindow(window) {
+        if (!window || typeof window !== 'object') {
+            return null;
+        }
+
+        let usedPercent = window.used_percent
+            ?? window.usedPercent
+            ?? window.usage_percent
+            ?? window.usagePercent
+            ?? window.percent_used
+            ?? window.percentUsed
+            ?? null;
+        const remainingPercent = window.remaining_percent ?? window.remainingPercent ?? null;
+        if (usedPercent == null && typeof remainingPercent === 'number') {
+            usedPercent = 100 - remainingPercent;
+        }
+
+        if (typeof usedPercent !== 'number' || !Number.isFinite(usedPercent)) {
+            return null;
+        }
+
+        return {
+            used_percent: this._coercePercent(usedPercent),
+            reset_at: this._normalizeResetTime(
+                window.reset_at
+                ?? window.resetAt
+                ?? window.resets_at
+                ?? window.resetsAt
+                ?? null
+            ),
+        };
+    }
+
+    _normalizeResetTime(value) {
+        if (typeof value === 'number' && Number.isFinite(value)) {
+            return new Date(value * 1000).toISOString();
+        }
+        if (typeof value === 'string' && value.trim() !== '') {
+            return value;
+        }
+
+        return null;
     }
 
     _coercePercent(value) {
@@ -430,16 +708,21 @@ class CodexUsageIndicator extends PanelMenu.Button {
         this._weeklyPercent.set_text('—');
         this._fiveHourResetLabel.set_text('Resets: —');
         this._weeklyResetLabel.set_text('Resets: —');
+        this._sparkPercent.set_text('—');
+        this._sparkResetLabel.set_text('Resets: —');
         this._updatePanelProgressBar(0);
         this._updateProgressBar(this._fiveHourProgressBar, 0);
         this._updateProgressBar(this._weeklyProgressBar, 0);
+        this._updateProgressBar(this._sparkProgressBar, 0);
     }
 
     _updateDisplay(data) {
-        const primaryUsed = this._usedPercent(data.rate_limit?.primary_window?.used_percent);
-        const secondaryUsed = this._usedPercent(data.rate_limit?.secondary_window?.used_percent);
+        const primaryUsed = this._usedPercent(data.primary?.used_percent);
+        const secondaryUsed = this._usedPercent(data.secondary?.used_percent);
+        const sparkUsed = data.spark ? this._usedPercent(data.spark.used_percent) : null;
         const primaryDisplay = this._displayPercent(primaryUsed);
         const secondaryDisplay = this._displayPercent(secondaryUsed);
+        const sparkDisplay = sparkUsed == null ? null : this._displayPercent(sparkUsed);
         const displaySuffix = this._usageDisplayMode() === 'remaining' ? 'remaining' : 'used';
 
         this._label.set_text(`${Math.round(primaryDisplay)}%`);
@@ -452,17 +735,33 @@ class CodexUsageIndicator extends PanelMenu.Button {
         this._weeklyPercent.set_text(`${secondaryDisplay.toFixed(1)}% ${displaySuffix}`);
         this._updateProgressBar(this._weeklyProgressBar, secondaryDisplay);
 
-        if (data.rate_limit?.primary_window?.reset_at) {
+        if (sparkDisplay == null) {
+            this._sparkPercent.set_text('No data');
+            this._updateProgressBar(this._sparkProgressBar, 0);
+            this._sparkResetLabel.set_text('Resets: —');
+        } else {
+            this._sparkPercent.set_text(`${sparkDisplay.toFixed(1)}% ${displaySuffix}`);
+            this._updateProgressBar(this._sparkProgressBar, sparkDisplay);
+            if (data.spark?.reset_at) {
+                this._sparkResetLabel.set_text(
+                    `Resets in ${this._formatResetTime(data.spark.reset_at)}`
+                );
+            } else {
+                this._sparkResetLabel.set_text('Resets: —');
+            }
+        }
+
+        if (data.primary?.reset_at) {
             this._fiveHourResetLabel.set_text(
-                `Resets in ${this._formatResetTime(data.rate_limit.primary_window.reset_at)}`
+                `Resets in ${this._formatResetTime(data.primary.reset_at)}`
             );
         } else {
             this._fiveHourResetLabel.set_text('Resets: —');
         }
 
-        if (data.rate_limit?.secondary_window?.reset_at) {
+        if (data.secondary?.reset_at) {
             this._weeklyResetLabel.set_text(
-                `Resets in ${this._formatResetTime(data.rate_limit.secondary_window.reset_at)}`
+                `Resets in ${this._formatResetTime(data.secondary.reset_at)}`
             );
         } else {
             this._weeklyResetLabel.set_text('Resets: —');
@@ -535,6 +834,7 @@ class CodexUsageIndicator extends PanelMenu.Button {
         const suffix = this._usageDisplayMode() === 'remaining' ? 'Remaining' : 'Used';
         this._fiveHourTitle.set_text(`5-Hour ${suffix}`);
         this._weeklyTitle.set_text(`Weekly ${suffix}`);
+        this._sparkTitle.set_text(`Spark ${suffix}`);
     }
 
     _formatResetTime(isoString) {
